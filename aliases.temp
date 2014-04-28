@@ -1,0 +1,538 @@
+
+# ==============================
+# PARTIAL .alias file
+# (C) Gunnar Andersson
+# License: Private file. I have not added a license (yet).
+# Use with permission.
+# ==============================
+#
+# vim: set ft=sh ts=3 sw=3 et:
+
+# Helper for find
+# Usage:  findname <some-search-string> <another-string>
+# Usage:  All strings must match.
+findname() {
+#  empty "$2"     && { d="." ; pat="$1" ; }
+#  not_empty "$2" && { d="$1" ; pat="$2" ; }
+  pat="$1"
+  d="."
+  shift
+  greps=""
+  for x in $* ; do
+    greps="$greps | grep -i $x"
+  done
+
+  aliasheader ${FUNCNAME} : find \"$d\" -iname \"*$pat*\" $greps
+  eval find "$d" -iname \"*$pat*\" $greps;
+}
+
+alias fn=findname
+
+aliasheader() {
+        1>&2 echo -e "-------------------------------------------------"
+        1>&2 echo -e $@
+        1>&2 echo -e "-------------------------------------------------"
+}
+
+# Usage: ask_set_variable_with_default VARNAME "Prompt text" <defaultvalue>
+# The result is stored in $VARNAME
+# Example: 
+#    ask_set_variable_with_default UBOOT "u-boot.bin location" "$DEFAULTUBOOT"
+#
+### Part of shellutils.sh (C) Gunnar Andersson, CC-BY 3.0
+# -------------------------------------------------------------------
+ask_set_variable_with_default()
+{
+   get_value_with_default "$2" "$3"
+   eval $1=$value
+}
+
+# -------------------------------------------------------------------
+# Pick n variables out of a list of values
+# The first list of arguments are variable names
+# The second list are values that maybe were received from some program
+# Usage: assign_n_vars <number-of-vars> VARNAME1 VARNAME2 ... VALUE1 VALUE2 ...
+# NOTE! The number of vars must be specified.
+# The function will return $VARNAME1 containing VALUE1 etc.
+# NOTE: Spaces are used to separate values so spaces may NOT occur in values
+# (or in variables for that matter)
+# If the number of values is less than variables, they will naturally be
+# assigned as empty.
+# If the number of values are more, there is a remainder in $remaining_values
+#
+### Part of shellutils.sh (C) Gunnar Andersson, CC-BY 3.0
+# -------------------------------------------------------------------
+assign_n_vars() {
+   n=$1 ; shift ; x=0 ; values="$*"
+   while [ $x -lt $n ] ; do
+      x=$(($x+1))
+      value=$(echo "$values" | cut -d" " -f $(($x+$n)))
+      eval $1=$value
+      shift
+   done
+   remaining_values=$(echo "$values" | cut -d" " -f $(($x+$n+1))-)
+}
+
+# Referring to the above function, this one assumes the list
+# of keys+values is even so the number of args is n/2
+# Then do the assign vars thing.
+# Note again that spaces are not handled at all even
+# if quoted...
+# Usage: assign_vars key1 key2 ... value1 value2 ...
+assign_vars() {
+  numvars=$(( $(echo $* | wc -w) / 2 ))
+  assign_n_vars $numvars $*
+}
+
+# -------------------------------------------------------------------
+# I needed a helper that estimates the speed of an ongoing download into a
+# directory So... take the dir size twice with some delay and calculate the
+# speed. Probably there are I/O programs like iotop that can give better
+# results because this method is of course not very accurate.
+# -------------------------------------------------------------------
+dir_download_speed() {
+   echo Measuring for 7 seconds.  Note this is not a very accurate measure...
+   echo $( (du -ks $1 ; sleep 7 ; du -ks $1) | awk '{print $1}' |  (echo "0" ; cat ; echo "--8*7/p" ) | dc) kbps
+}
+
+# -------------------------------------------------------------------------
+# regexp_match
+# -------------------------------------------------------------------------
+# Even if simple, this syntactic sugar helper is surprisingly useful
+# and used in later function definitions also.
+# Usage: regexp_match 'perl-regex' STRING
+# TIP:  Put regexp in single-quotes to avoid trouble with special characters
+# NOTE: Perl-style regexps are assumed.
+#
+### Part of shellutils.sh (C) Gunnar Andersson, CC-BY 3.0
+regexp_match() { echo "$2" | grep -q -P "$1" ; }
+
+
+# -------------------------------------------------------------------------
+# Helpers for functions that take "named parameters" as input parameters  
+# -------------------------------------------------------------------------
+
+# Like this:
+# myfunc namedparameter=value1 another=value2
+# After evaluation, myfunc uses them as $namedparameter, $another
+
+# arg_is_variable_assignment: Check that input matches the var=value pattern
+# Once it is known to be x=y format, simply do eval: 
+# E.g. eval $1  -->  expands to "eval var=value" so that value can be accessed
+# through $var
+# arg_is_variable_assignment() { regexp_match '^\w+=\w+$' $1 ; }
+
+# Improvement: provide a list of allowed variable names
+# arg_is_variable_assignment <var-arg> [list|of|allowed|variable|names]
+#
+### Part of shellutils.sh (C) Gunnar Andersson, CC-BY 3.0
+
+arg_is_variable_assignment() 
+{ 
+   # Format check var=arg
+   regexp_match '^\w+=\S+$' "$1" || return 1 # Failed format
+   # Check against list of allowed names "x|y|z"
+   not_empty "$2" && regexp_match "^($2)=" "$1" || return 1
+   return 0
+}
+
+# Untested!
+# But should probably be called using quotes, something like this
+# eval_input_variables "command|inputfile|outputfile" $@
+# or 
+# eval_input_variables "command|inputfile|outputfile" "$2" "$3" "$4"
+eval_input_variables() {
+   allowed="$1" 
+   shift
+   for f in $@ ; do 
+      if arg_is_variable_assignment "$f" "$1" ; then
+         eval "$f"
+      fi
+   done
+}
+
+#     echo "ack not installed => using fgrep."
+#     fgrep -r "$@"
+#   fi
+#}
+
+# ps | grep...
+rgrep() {
+   if command_ok ack-grep ; then
+     echo "rgrep: using ack-grep"
+     ack-grep -a "$@"
+   else
+     echo "ack not installed => using fgrep."
+     fgrep -r "$@"
+   fi
+}
+
+# -------------------------------------------------------------
+# Process mgmt
+# -------------------------------------------------------------
+# Signal any running dd process to print its progress
+ddstatus() {
+    MacOSX && sig=SIGINFO
+    Linux  && sig=USR1
+    pids=$(psegrep " [d]d " 2>/dev/null | awk '{print $2}')
+    [ -z "$pids" ] && { echo "Found no running dd process" ; return 1; }
+    echo -n "Sending $sig to all dd processes: "
+    for p in $pids ; do
+       echo "$p :"
+       kill -s $sig $p
+       sleep 0.2
+    done
+    echo ""
+}
+
+# dd with regularly repeated progress updates
+# Inspired by:
+# http://www.commandlinefu.com/commands/view/7214/start-dd-and-show-progress-every-x-seconds
+#and
+# http://www.noah.org/wiki/Dd_-_Destroyer_of_Disks
+
+#dd if=/dev/sda | gzip -c - | ssh user@example.com "dd of=disk_image.gz" &
+#pid=$!
+#while ps -p $pid > /dev/null; do kill -USR1 $pid; sleep 10; done
+
+ddd() {
+
+   _dddusage() {
+      echo "Usage: ddd [interval] <dd args>"
+      command_ok pv && echo "NOTE! You could also pipe through pv... dd if=... | pv | dd of=..."
+   }
+
+   aliasheader ${FUNCNAME} "= \"DD with Display of progress\""
+   empty "$1" && _dddusage && return
+   empty "$2" && _dddusage && return
+   # Different signal (for status printout) on different platforms apparently
+   if_MacOSX eval sig=SIGINFO
+   if_Linux  eval sig=USR1
+
+   # Some crude checks to see if first argument is non-numeric
+   # So 2 are redundant probably but at least one of them works
+   non_numeric=false
+   echo $1 | bc 2>&1 | fgrep -q "parse error" && eval non_numeric=true
+   ( yy= $(($1+1)) ) 2>&- || eval non_numeric=true
+   # Anything evaluatinging to zero is also not allowed.
+   [ "$(echo $1 | bc 2>&1)" == "0" ] && eval non_numeric=true
+
+   if $non_numeric ; then
+      echo "Using default signal interval of 5 seconds"
+      sleeptime=5
+   else
+      sleeptime=$1 ; shift
+   fi
+
+   echo "$@" | fgrep bs= || {
+      echo "No blocksize given, assuming 1M.  Adding bs=1M to arguments"
+      EXTRAARGS='bs=1M'
+   }
+
+   echo dd "$@" $EXTRAARGS
+
+   ( dd "$@" $EXTRAARGS ; echo "Syncing disks" ; sync ) & 2>&1
+
+   pid=$! && sleep $sleeptime && while kill -s $sig $pid 2>/dev/null; do sleep $sleeptime; done
+}
+
+# ----------------------------------------
+# improve file command -- handle symlinks intelligently
+file() {
+  /usr/bin/file "$@"
+  for f in "$@" ; do
+  [ -L $f ] && {
+     echo Following symlink:
+     echo -n $f:
+     /usr/bin/file -L $f
+   }
+  done
+}
+
+alias ping8="ping -a -c 1 8.8.4.4"
+alias pingr="ping -a -c 1 8.8.4.4"
+
+lldev()
+{
+  mkdir -p /tmp/lldev.$$
+  [ -z $1 ] && { echo "lldev: <device-partition>" ; return ; }
+  [ ! -e $1 ] && { echo "lldev: <device-partition>" ; return ; }
+if [ ! -b $1 -a -f $1 ] ; then
+  echo "Not a block device -- trying loop"
+  sudo mount -o loop $1 /tmp/lldev.$$ || { echo Failed ; return 1 ; }
+else
+  d=$1
+  echo $d | egrep -q "[0123456789]$"
+  [ $? != 0 ] && { echo "Not a partition. Trying ${d}1" ; d=${d}1 ; }
+  sudo mount $d /tmp/lldev.$$ || { echo Failed ; return 1 ; }
+fi
+  ls -al /tmp/lldev.$$
+  sudo umount $d
+}
+
+# mnt <device> = mount device on /mnt, (mntf = -f = force mount by removing previous mount at /mnt)
+mnt() {
+  mountpoint=/mnt
+  dev=$1
+  [ "$dev" = "" ] && { echo "Usage: mnt <file/device (partition)>" ; return 1 ; }
+  [ "$2" != "" ] && mountpoint="$2"
+
+  # Just in case, shouldn't be standing in the directory while mounting ...
+  cddir="$(pwd)"
+  if [ "$(pwd)" = "$mountpoint" ] ; then cd ; fi
+  [ ! -b "$dev" -a -b "/dev/$dev" ] && dev="/dev/$dev"
+  echo "Attempting to mount $dev at $mountpoint"
+
+  #sudo mount -o user,dmask=000 "$dev" "$mountpoint"
+  sudo mount -o user "$dev" "$mountpoint"
+  if [ $? == 0 ] ; then
+     echo -n Checking...
+     mount | grep $dev | grep $mountpoint
+     if [ $? == 0 ] ; then
+        echo "Yes, it's now mounted."
+        echo "Hit return (within 2 seconds) to list contents"
+        read -t 2 x && ls -al "$mountpoint"
+     else
+        echo "Hmm, not found in mount list after all..."
+     fi
+  else
+     echo "mount returned error"
+  fi
+
+  cd "$cddir"
+}
+
+# mntf = like mnt + force (note: it doesn't do mount -f but rather it
+# unmouts previous mount first)
+mntf() {
+  mountpoint=/mnt
+  [ "$1" = "" ] && { echo "Usage: mntf <file/device (partition)>" ; return 1 ; }
+  [ "$2" != "" ] && mountpoint="$2"
+  cddir="$(pwd)"
+  # We shouldn't be standing in the directory being unmounted...
+  if [ "$(pwd)" = "$mountpoint" ] ; then cddir="$(pwd)" ; cd ; fi
+  sudo umount -f "$mountpoint"
+  sudo mount "$1" "$mountpoint"
+  cd "$cddir"
+}
+
+# FIXME:
+# make this smarter.  It is now both assuming /mnt
+# and also grepping mount list...
+unmountdisk() {
+   origdir="$(pwd)"
+
+   echo "$1" | grep /dev/sda && { echo "Aborted. Configured to disallow /dev/sda*" ; return ; }
+   [ "$1" == "/" ] && { echo "Aborted. Configured to disallow /" ; return ; }
+   [ "$1" == "/boot" ] && { echo "Aborted. Configured to disallow /boot" ; return ; }
+   [ "$1" == "/home" ] && { echo "Aborted. Configured to disallow /home" ; return ; }
+
+   # We shouldn't be standing in the directory being unmounted...
+   if [ "$(pwd)" == "$1" ] ; then echo "Moving out of target dir $1" ; cd ; fi
+
+   # ...or if $1 was device, then mountpoint was given as $2, and we need to
+   # use a partial match (i.e. grep, not equality)
+#   echo pwd $PWD
+#   echo "\$2" $2
+   [ -n "$2" ] && pwd | egrep -q "^$2" && { echo "Moving out of mountpoint dir $2 first." ; cd ; }
+   sudo umount -f "$1"
+   if [ $? -eq 0 ] ; then 	
+      echo -n "Returned success for $1..."
+      /bin/echo -n "checking..."
+      mount | grep -q "$1"
+      if [ $? -ne 0 ] ; then
+         echo "yes, it's gone!"
+      else
+	 echo found
+         echo "Hmm, it is still in mount list!?"
+         echo See:
+         echo "mount | grep \"$1\""
+         mount | grep "$1"
+      fi
+   else
+      echo "Sorry, unmount $1 returned failure"
+   fi
+
+   [ "$PWD" != "$origdir" ] && {
+	   echo "Moving back to your working directory: $origdir"
+           [ ! -d "$origdir" ] && { echo "No, it no longer exists - going to home dir instead." ; origdir=~ ; }
+           cd "$origdir"
+   }
+}
+
+umnt() {
+  [ -n "$1" ] && device_or_mountpoint="$1"
+  [ -z "$1" ] && { device_or_mountpoint="/mnt" ; mparg="/mnt" ; echo "No args -> assuming you want to unmount /mnt" ; }
+  cddir="$PWD"
+
+  # Searching for device names in mount (1st column of /proc/mount)
+  # Should accept partial input, e.g. "sdb" instead of /dev/sdb1.
+  # So if <device> was given then /dev/<device>* might be a candidate.
+  # That's easily solved by pattern matching mounts against input, and then for
+  # this match against devices also require that /dev is a prefix.
+  match=""
+  match_dev=$(/bin/fgrep "$device_or_mountpoint" </proc/mounts | awk1 | egrep "^/dev")
+  [ -n "$match_dev" ] && {
+	  match+="$match_dev"
+          mparg=$(/bin/fgrep "$device_or_mountpoint" </proc/mounts | awk2)
+  }
+
+  # Otherwise search mounts for matches against the mount point name instead (2nd column of /proc/mounts)
+  [ -z "$match" ] && match=$(cat /proc/mounts | grep "$device_or_mountpoint" | awk2)
+
+  printmatch="$(echo $match)"  # This normalizes text and puts multiline value on a single line
+  mparg="$(echo $mparg)"       # -- " --
+
+  [ -z "$match" ] && echo Mounts: No match. Checking loop devices also.
+  [ -n "$match" ] && {
+     xtext=""
+     [ -n "$mparg" ] && xtext="(at $mparg)"
+     echo "Attempting umount(s) of $printmatch"
+     echo "                        $xtext"
+     for d in $match ; do
+        unmountdisk "$d" "$mparg"
+     done
+  }
+  # Special matching for loop mounts.  The original file is then not listed in /proc/mounts,
+  # only the loop device.  But we want to match against original file name.
+  # Output of "mount" lists the file but that is is hard to parse consistently.
+  # So we make use of both sources and figure out which loop device is being
+  # used for file names that match the given input, then unmount it.
+  loop_mount_points=$(cat /proc/mounts | grep loop | awk2)
+  for lmp in $loop_mount_points ; do
+     # Get candidate lines from mount
+     mount | grep "$device_or_mountpoint"  | \
+        while read line ; do
+           candidate=$(echo $line | awk1) # Mounted file for reporting
+           # The loop device connected to this mountpoint?
+           ld=$(grep $lmp </proc/mounts | awk1)
+           echo $line | grep -q $lmp && {
+              echo "Attempting umount of $candidate, mounted on $lmp via $ld"
+              unmountdisk $ld
+           }
+        done
+  done
+  cd "$cddir"
+}
+
+mntpart() {
+   _mntpartusage() {
+      echo "Usage: mntpart <file> <partition-number> [mountpoint]"
+      echo "(Default mountpoint is /mnt)"
+   }
+   file=$1
+   n=$2
+   mountpoint=$3
+
+   [ -z "$n" ] && { echo "mntpart: No partition number specified" ; _mntpartusage ; return 1 ; }
+   [ -z "$file" ] && { echo "mntpart: No image file specified" ; _mntpartusage ; return 1 ; }
+   [ -z "$mountpoint" ] && mountpoint=/mnt # FIXME, maybe generate a dynamic dir instead
+
+   [ -f "$mountpoint" ] && { echo "Mountpoint exists but as a file! Giving up. " ; return 1 ; }
+   [ -d "$mountpoint" ] || { echo "Mountpoint does not exist, creating" ; mkdir -p $mountpoint ; }
+
+   offset=$(fdisk -l "$file" | skip_at_beginning 10 | pick $n | awk '{print $2}')
+
+   byte=$(($offset*512))
+   echo "Partition $n starts at sector $offset = byte $byte"
+   cmd="sudo mount -o offset=$byte $file $mountpoint"
+   echo "$cmd"
+   $cmd
+   echo "Listing contents of $mountpoint : "
+   ls -al $mountpoint
+}
+
+# Work in progress
+sdinfo() {
+	for d in /dev/sd[bcdefghi] ; do
+		[ -b $d ] && {
+			sudo fdisk -l $d
+		}
+	done
+}
+
+# -------------------------------------------------------------
+# "Explore"
+# -------------------------------------------------------------
+
+# e = "Explorer" here
+if Linux ; then
+   alias e="nautilus . $@ &"
+fi
+
+if MacOSX ; then
+   alias e="open ."
+fi
+
+
+# Print def of function, and if it's not a function it's probably an alias
+fdef() {
+   typeset -f $* || alias $1
+}
+
+# -------------------------------------------------------------
+# TODOs
+# -------------------------------------------------------------
+rreplace() {
+   echo recursive replace?
+   echo This function is not yet written but you could use something like:
+   echo "find . -name "*.txt" | xargs perl -pi -e 's/old/new/g'"
+   echo or
+   echo "find . -name '*.txt' -exec sed -ir 's/old/new/g' {} \;"
+}
+
+locale_us() {
+   export LC_ALL=en_US.UTF-8
+   export LC_CTYPE=en_US.UTF-8
+}
+
+# Run a command repeatedly and when its output changes, let me know
+change() {
+   a=$($@ 2>&1 | md5sum)
+   while true ; do
+      b=$("$@" 2>&1 | md5sum)
+      if [ "$a" != "$b" ] ; then
+         echo "*** Changed!"
+         $@
+         return
+      fi
+      sleep 1
+   done
+}
+
+# Make number human-readable (like -h flag on du / df etc.)
+# FIXME - this always rounds *down* to a whole number.
+# Tenth decimal and proper rounding would be nice...
+
+hnum() {
+   nums=$1
+   [ -z $1 ] && nums=$(cat) # No argument -- assume stdin
+   for n in $nums ; do
+   # is numeric?
+      numcheck=$(echo $n | bc 2>/dev/null)
+      if [ ! -z "$numcheck" -a ! "$numcheck" = "0" ] ; then
+         echo -n $n
+         [ "$n" -ge $((1024**1)) ] && echo -n " ~= $(echo 1k $n '1024 1^/p' | dc)K"
+         [ "$n" -ge $((1024**2)) ] && echo -n " ~= $(echo 1k $n '1024 2^/p' | dc)M"
+         [ "$n" -ge $((1024**3)) ] && echo -n " ~= $(echo 1k $n '1024 3^/p' | dc)G"
+         [ "$n" -ge $((1024**4)) ] && echo -n " ~= $(echo 1k $n '1024 4^/p' | dc)T"
+         echo " (rounded down)"
+      fi
+   done
+}
+
+# http://www.commandlinefu.com/commands/view/4167/view-the-newest-xkcd-comic.
+xkcd(){ wget -qO- http://xkcd.com/|tee >(feh $(grep -Po '(?<=")http://imgs[^/]+/comics/[^"]+\.\w{3}'))|grep -Po '(?<=(\w{3})" title=").*(?=" alt)';}
+xkcdrandom(){ local f;f=$(wget -q http://dynamic.xkcd.com/comic/random/ -O -);feh $(echo "$f"|grep -Po '(?<=")http://imgs.xkcd.com/comics/[^"]+(png|jpg)');echo "$f"|awk '/<img src="http:\/\/imgs\.xkcd\.com\/comics\/.*?" title=.*/{gsub(/^.*title=.|".*?$/,"");print}';}
+
+# Print "external" ip address
+myip() {
+   # This one seems quickest:
+   fancyalias dig +short myip.opendns.com @resolver1.opendns.com
+
+   # Alternatives:
+   # curl ip.appspot.com
+   # curl ifconfig.me
+   # curl icanhazip.com
+   # curl -s http://checkip.dyndns.org/ | grep -o "[[:digit:].]\+"
+}
